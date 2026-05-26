@@ -1,0 +1,309 @@
+{
+  "name": "Bonus – Uptime Monitor (Conduit / RealWorld)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "b0000001-0001-0001-0001-b00000000001",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Inject a timestamp before the ping so we can measure response time\nreturn [{ json: { pingStart: Date.now(), targetUrl: 'https://demo.realworld.how' } }];\n"
+      },
+      "id": "b0000001-0002-0002-0002-b00000000002",
+      "name": "Set Ping Start Time",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.targetUrl }}",
+        "method": "GET",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "b0000001-0003-0003-0003-b00000000003",
+      "name": "Ping Target App",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const pingData  = $('Set Ping Start Time').item.json;\nconst response  = $input.item.json;\n\nconst elapsed   = Date.now() - pingData.pingStart;\nconst status    = response.statusCode || response.status || 0;\nconst ok        = (status >= 200 && status < 300);\n\n// Accumulate daily stats in static data\nconst storage   = $getWorkflowStaticData('node');\nif (!storage.daily) storage.daily = { checks: 0, failures: 0, totalMs: 0, date: new Date().toISOString().slice(0,10) };\n\n// Reset daily counters if a new UTC day has started\nconst today = new Date().toISOString().slice(0, 10);\nif (storage.daily.date !== today) {\n  storage.daily = { checks: 0, failures: 0, totalMs: 0, date: today };\n}\n\nstorage.daily.checks++;\nstorage.daily.totalMs += elapsed;\nif (!ok) storage.daily.failures++;\n\nconst avgMs = Math.round(storage.daily.totalMs / storage.daily.checks);\n\nreturn [{\n  json: {\n    url:         pingData.targetUrl,\n    status,\n    ok,\n    elapsed_ms:  elapsed,\n    avg_ms_today: avgMs,\n    daily_checks: storage.daily.checks,\n    daily_failures: storage.daily.failures,\n    checkedAt:   new Date().toISOString()\n  }\n}];\n"
+      },
+      "id": "b0000001-0004-0004-0004-b00000000004",
+      "name": "Measure & Track Stats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "cond-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "false" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "b0000001-0005-0005-0005-b00000000005",
+      "name": "Is Down?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Retry logic: wait 30s then re-ping before alerting\nconst d = $input.item.json;\nreturn [{ json: { ...d, retryAlert: true } }];\n"
+      },
+      "id": "b0000001-0006-0006-0006-b00000000006",
+      "name": "Flag for Retry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "amount": 30,
+        "unit": "seconds"
+      },
+      "id": "b0000001-0007-0007-0007-b00000000007",
+      "name": "Wait 30s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": { "fullResponse": true, "neverError": true }
+          }
+        }
+      },
+      "id": "b0000001-0008-0008-0008-b00000000008",
+      "name": "Retry Ping",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 200],
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "cond-retry-ok",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "b0000001-0009-0009-0009-b00000000009",
+      "name": "Retry Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the alert message for Discord\nconst d = $('Measure & Track Stats').item.json;\nconst retryStatus = $input.item.json.statusCode || 0;\n\nconst payload = {\n  content: null,\n  embeds: [{\n    title:       '🔴 DOWNTIME ALERT — Conduit is not responding',\n    description: [\n      `**URL:** ${d.url}`,\n      `**HTTP Status:** \\`${retryStatus}\\` (confirmed after retry)`,\n      `**Response Time:** ${d.elapsed_ms} ms`,\n      `**Detected At:** ${d.checkedAt}`,\n      `**Today's Stats:** ${d.daily_checks} checks, ${d.daily_failures} failure(s), avg ${d.avg_ms_today} ms`\n    ].join('\\n'),\n    color: 15158332\n  }]\n};\n\nreturn [{ json: payload }];\n"
+      },
+      "id": "b0000001-0010-0010-0010-b00000000010",
+      "name": "Build Down Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 8000 }
+      },
+      "id": "b0000001-0011-0011-0011-b00000000011",
+      "name": "Send Down Alert to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2440, 300],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "cred-discord",
+          "name": "Discord Webhook"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "cond-daily",
+              "leftValue": "={{ new Date().getUTCHours() }}",
+              "rightValue": 8,
+              "operator": { "type": "number", "operation": "equal" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "b0000001-0012-0012-0012-b00000000012",
+      "name": "Is 08:00 UTC?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 460]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.item.json;\nconst uptimePct = d.daily_checks > 0\n  ? (((d.daily_checks - d.daily_failures) / d.daily_checks) * 100).toFixed(2)\n  : '100.00';\n\nconst payload = {\n  content: null,\n  embeds: [{\n    title:       '📊 Daily Uptime Summary — Conduit',\n    description: [\n      `**Date:** ${d.checkedAt.slice(0,10)}`,\n      `**Total Checks:** ${d.daily_checks}`,\n      `**Failures:** ${d.daily_failures}`,\n      `**Uptime:** ${uptimePct}%`,\n      `**Avg Response Time:** ${d.avg_ms_today} ms`\n    ].join('\\n'),\n    color: 3066993\n  }]\n};\n\nreturn [{ json: payload }];\n"
+      },
+      "id": "b0000001-0013-0013-0013-b00000000013",
+      "name": "Build Daily Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 460]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 8000 }
+      },
+      "id": "b0000001-0014-0014-0014-b00000000014",
+      "name": "Post Daily Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 460],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "cred-discord",
+          "name": "Discord Webhook"
+        }
+      },
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [{ "node": "Set Ping Start Time", "type": "main", "index": 0 }]
+      ]
+    },
+    "Set Ping Start Time": {
+      "main": [
+        [{ "node": "Ping Target App", "type": "main", "index": 0 }]
+      ]
+    },
+    "Ping Target App": {
+      "main": [
+        [{ "node": "Measure & Track Stats", "type": "main", "index": 0 }]
+      ]
+    },
+    "Measure & Track Stats": {
+      "main": [
+        [
+          { "node": "Is Down?", "type": "main", "index": 0 },
+          { "node": "Is 08:00 UTC?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Is Down?": {
+      "main": [
+        [{ "node": "Flag for Retry", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Flag for Retry": {
+      "main": [
+        [{ "node": "Wait 30s", "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait 30s": {
+      "main": [
+        [{ "node": "Retry Ping", "type": "main", "index": 0 }]
+      ]
+    },
+    "Retry Ping": {
+      "main": [
+        [{ "node": "Retry Passed?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Retry Passed?": {
+      "main": [
+        [],
+        [{ "node": "Build Down Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Down Alert": {
+      "main": [
+        [{ "node": "Send Down Alert to Discord", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is 08:00 UTC?": {
+      "main": [
+        [{ "node": "Build Daily Summary", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Build Daily Summary": {
+      "main": [
+        [{ "node": "Post Daily Summary", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-05-25T00:00:00.000Z",
+  "versionId": "1"
+}
