@@ -1,0 +1,286 @@
+{
+  "name": "Morning Brief – GitHub Trending → Discord Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/search/repositories",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "topic:automation created:>2024-01-01" },
+            { "name": "sort", "value": "stars" },
+            { "name": "order", "value": "desc" },
+            { "name": "per_page", "value": "10" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Accept", "value": "application/vnd.github+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a1b2c3d4-0002-0002-0002-000000000002",
+      "name": "Fetch GitHub Repos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Transform: keep top 5, reshape fields ──────────────────────\nconst items = $input.all();\n\n// If the HTTP call failed, pass the error downstream\nif (items[0].json.error) {\n  return [{ json: { _error: true, message: items[0].json.message || 'GitHub fetch failed' } }];\n}\n\nconst repos = items[0].json.items || [];\n\nconst top5 = repos\n  .sort((a, b) => b.stargazers_count - a.stargazers_count)\n  .slice(0, 5)\n  .map(r => ({\n    name:        r.full_name,\n    description: r.description || '(no description)',\n    stars:       r.stargazers_count,\n    url:         r.html_url,\n    language:    r.language || 'N/A',\n    readme_api:  `https://api.github.com/repos/${r.full_name}/readme`,\n    _error:      false\n  }));\n\nreturn top5.map(r => ({ json: r }));\n"
+      },
+      "id": "a1b2c3d4-0003-0003-0003-000000000003",
+      "name": "Transform – Top 5 Repos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.readme_api }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Accept", "value": "application/vnd.github.raw+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "a1b2c3d4-0004-0004-0004-000000000004",
+      "name": "Enrich – Fetch README",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300],
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge README first 300 chars back into repo object\nconst repo   = $('Transform – Top 5 Repos').item.json;\nconst readme = $input.item.json;\n\nlet snippet = '(README unavailable)';\nif (readme && typeof readme === 'string') {\n  snippet = readme.replace(/[#*`>\\[\\]]/g, '').substring(0, 300).trim() + '…';\n} else if (readme && readme.content) {\n  // base64 encoded fallback\n  try {\n    snippet = Buffer.from(readme.content, 'base64').toString('utf-8')\n      .replace(/[#*`>\\[\\]]/g, '').substring(0, 300).trim() + '…';\n  } catch (_) {}\n}\n\nreturn [{ json: { ...repo, readme_snippet: snippet } }];\n"
+      },
+      "id": "a1b2c3d4-0005-0005-0005-000000000005",
+      "name": "Merge README Snippet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-stars",
+              "leftValue": "={{ $json.stars }}",
+              "rightValue": 1000,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0006-0006-0006-000000000006",
+      "name": "IF Stars >= 1000",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate all hot repos (stars >= 1000) into one Discord message\nconst allItems = $input.all();\n\nconst lines = allItems.map(item => {\n  const r = item.json;\n  return `**[${r.name}](${r.url})** ⭐ ${r.stars.toLocaleString()}\\n` +\n         `> ${r.description}\\n` +\n         `Language: \\`${r.language}\\`\\n` +\n         `README: ${r.readme_snippet}`;\n}).join('\\n\\n---\\n\\n');\n\nconst payload = {\n  content: null,\n  embeds: [{\n    title:       '🔥 Morning Brief — Hot GitHub Repos (≥1 k ⭐)',\n    description: lines.substring(0, 4000),\n    color:       5763719,\n    footer:      { text: `Generated at ${new Date().toUTCString()}` }\n  }]\n};\n\nreturn [{ json: payload }];\n"
+      },
+      "id": "a1b2c3d4-0007-0007-0007-000000000007",
+      "name": "Build Hot Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate repos with < 1000 stars into a shorter 'rising' message\nconst allItems = $input.all();\n\nconst lines = allItems.map(item => {\n  const r = item.json;\n  return `• **[${r.name}](${r.url})** ⭐ ${r.stars} — ${r.description}`;\n}).join('\\n');\n\nconst payload = {\n  content: null,\n  embeds: [{\n    title:       '📈 Morning Brief — Rising GitHub Repos (<1 k ⭐)',\n    description: lines.substring(0, 4000) || 'No rising repos found.',\n    color:       16776960,\n    footer:      { text: `Generated at ${new Date().toUTCString()}` }\n  }]\n};\n\nreturn [{ json: payload }];\n"
+      },
+      "id": "a1b2c3d4-0008-0008-0008-000000000008",
+      "name": "Build Rising Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "a1b2c3d4-0009-0009-0009-000000000009",
+      "name": "Post Hot to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 200],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "cred-discord",
+          "name": "Discord Webhook"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "a1b2c3d4-0010-0010-0010-000000000010",
+      "name": "Post Rising to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 420],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "cred-discord",
+          "name": "Discord Webhook"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\"content\": \"🚨 **Workflow Error** — Morning Brief failed at node `{{ $json.node || 'unknown' }}`: {{ $json.message || $json.error || 'unknown error' }}\"}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0011-0011-0011-000000000011",
+      "name": "Error Handler – Notify Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 520],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "cred-discord",
+          "name": "Discord Webhook"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [{ "node": "Fetch GitHub Repos", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch GitHub Repos": {
+      "main": [
+        [{ "node": "Transform – Top 5 Repos", "type": "main", "index": 0 }]
+      ],
+      "error": [
+        [{ "node": "Error Handler – Notify Discord", "type": "main", "index": 0 }]
+      ]
+    },
+    "Transform – Top 5 Repos": {
+      "main": [
+        [{ "node": "Enrich – Fetch README", "type": "main", "index": 0 }]
+      ]
+    },
+    "Enrich – Fetch README": {
+      "main": [
+        [{ "node": "Merge README Snippet", "type": "main", "index": 0 }]
+      ],
+      "error": [
+        [{ "node": "Error Handler – Notify Discord", "type": "main", "index": 0 }]
+      ]
+    },
+    "Merge README Snippet": {
+      "main": [
+        [{ "node": "IF Stars >= 1000", "type": "main", "index": 0 }]
+      ]
+    },
+    "IF Stars >= 1000": {
+      "main": [
+        [{ "node": "Build Hot Digest", "type": "main", "index": 0 }],
+        [{ "node": "Build Rising Digest", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Hot Digest": {
+      "main": [
+        [{ "node": "Post Hot to Discord", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Rising Digest": {
+      "main": [
+        [{ "node": "Post Rising to Discord", "type": "main", "index": 0 }]
+      ]
+    },
+    "Post Hot to Discord": {
+      "error": [
+        [{ "node": "Error Handler – Notify Discord", "type": "main", "index": 0 }]
+      ]
+    },
+    "Post Rising to Discord": {
+      "error": [
+        [{ "node": "Error Handler – Notify Discord", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-05-25T00:00:00.000Z",
+  "versionId": "1"
+}
